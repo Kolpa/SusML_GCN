@@ -68,7 +68,7 @@ class SAGE(torch.nn.Module):
 
         x_target = x[:adjs[1][2][1]]
         x = _remote_method(
-            SAGEConv.forward,
+            SAGEConv.__call__,
             self.remote_layer_rref,
             args=((x, x_target), adjs[1][0])
         )
@@ -99,7 +99,7 @@ class SAGE(torch.nn.Module):
             x_target = x[:size[1]]
 
             x = _remote_method(
-                SAGEConv.forward,
+                SAGEConv.__call__,
                 self.remote_layer_rref,
                 args=((x, x_target), edge_index)
             )

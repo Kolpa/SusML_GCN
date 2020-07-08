@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "susml"
+version = "0.1.0"
+description = "Help me JEsus"
+authors = ["Your Name <you@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+torch = {url = "https://download.pytorch.org/whl/cpu/torch-1.5.0%2Bcpu-cp38-cp38-linux_x86_64.whl"}
+torch-scatter = {url = "https://pytorch-geometric.com/whl/torch-1.5.0/torch_scatter-latest%2Bcpu-cp38-cp38-linux_x86_64.whl"}
+torch-sparse = {url = "https://pytorch-geometric.com/whl/torch-1.5.0/torch_sparse-latest%2Bcpu-cp38-cp38-linux_x86_64.whl"}
+torch-cluster = {url = "https://pytorch-geometric.com/whl/torch-1.5.0/torch_cluster-latest%2Bcpu-cp38-cp38-linux_x86_64.whl"}
+torch-spline-conv = {url = "https://pytorch-geometric.com/whl/torch-1.5.0/torch_spline_conv-latest%2Bcpu-cp38-cp38-linux_x86_64.whl"}
+torch-geometric = "*"
+
+[tool.poetry.dev-dependencies]
+flake8 = "^3.8.3"
+
+[build-system]
+requires = ["poetry>=0.12"]
+build-backend = "poetry.masonry.api"

@@ -1,12 +1,16 @@
 import os.path as osp
-
+import os
 import torch
 import torch.nn.functional as F
+import torch.distributed.rpc as rpc
+import torch.distributed as dist
+import argparse
 from tqdm import tqdm
 from torch_geometric.datasets import Reddit
 from torch_geometric.data import NeighborSampler
 from torch_geometric.nn import SAGEConv
-from torch.distributed.rpc import rpc_sync
+from torch.distributed.rpc import rpc_sync, RRef
+from torch.distributed.optim.optimizer import DistributedOptimizer
 
 
 def _call_method(method, rref, *args, **kwargs):
@@ -18,24 +22,40 @@ def _remote_method(method, rref, *args, **kwargs):
     return rpc_sync(rref.owner(), _call_method, args=args, kwargs=kwargs)
 
 
+def _parameter_rrefs(module):
+    param_rrefs = []
+    for param in module.parameters():
+        param_rrefs.append(RRef(param))
+    return param_rrefs
+
+
+print("SOUP0")
 path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'Reddit')
 dataset = Reddit(path)
 data = dataset[0]
 
-train_loader = NeighborSampler(data.edge_index, node_idx=data.train_mask,
-                               sizes=[25, 10], batch_size=1024, shuffle=True,
-                               num_workers=12)
-subgraph_loader = NeighborSampler(data.edge_index, node_idx=None, sizes=[-1],
-                                  batch_size=1024, shuffle=False,
-                                  num_workers=12)
+print("SOUP")
+
+# train_loader = NeighborSampler(data.edge_index, node_idx=data.train_mask,
+#                               sizes=[25, 10], batch_size=1024, shuffle=True,
+#                               num_workers=12)
+
+print("SOUP2")
+# subgraph_loader = NeighborSampler(data.edge_index, node_idx=None, sizes=[-1],
+#                                  batch_size=1024, shuffle=False,
+#                                  num_workers=12)
+print("SOUP3")
 
 
 class SAGE(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels):
+    def __init__(self, worker_name, in_channels, hidden_channels, out_channels):
         super(SAGE, self).__init__()
 
         self.local_layer = SAGEConv(in_channels, hidden_channels)
-        self.remote_layer = SAGEConv(hidden_channels, out_channels)
+        self.remote_layer_rref = rpc.remote(
+            worker_name, SAGEConv, args=(hidden_channels, out_channels))
+
+        print("SAGE init done")
 
     def forward(self, x, adjs):
         # `train_loader` computes the k-hop neighborhood of a batch of nodes,
@@ -47,10 +67,17 @@ class SAGE(torch.nn.Module):
 
         x_target = x[:adjs[0][2][1]]
         x = self.local_layer((x, x_target), adjs[0][0])
+
         x = F.relu(x)
         x = F.dropout(x, p=0.5, training=self.training)
+
         x_target = x[:adjs[1][2][1]]
-        x = self.remote_layer((x, x_target), adjs[1][0])
+        x = _remote_method(
+            SAGEConv.forward,
+            self.remote_layer_rref,
+            args=((x, x_target), adjs[1][0])
+        )
+
         return x.log_softmax(dim=-1)
 
     def inference(self, x_all):
@@ -59,12 +86,12 @@ class SAGE(torch.nn.Module):
 
         xs = []
         for batch_size, n_id, adj in subgraph_loader:
-            edge_index, _, size = adj.to(device)
-            x = x_all[n_id].to(device)
+            edge_index, _, size = adj
+            x = x_all[n_id]
             x_target = x[:size[1]]
             x = self.local_layer((x, x_target), edge_index)
             x = F.relu(x)
-            xs.append(x.cpu())
+            xs.append(x)
 
             pbar.update(batch_size)
 
@@ -72,11 +99,17 @@ class SAGE(torch.nn.Module):
 
         xs = []
         for batch_size, n_id, adj in subgraph_loader:
-            edge_index, _, size = adj.to(device)
-            x = x_all[n_id].to(device)
+            edge_index, _, size = adj
+            x = x_all[n_id]
             x_target = x[:size[1]]
-            x = self.remote_layer((x, x_target), edge_index)
-            xs.append(x.cpu())
+
+            x = _remote_method(
+                SAGEConv.forward,
+                self.remote_layer_rref,
+                args=((x, x_target), edge_index)
+            )
+
+            xs.append(x)
 
             pbar.update(batch_size)
 
@@ -86,18 +119,19 @@ class SAGE(torch.nn.Module):
 
         return x_all
 
-
-device = torch.device('cpu')
-model = SAGE(dataset.num_features, 256, dataset.num_classes)
-model = model.to(device)
-
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-
-x = data.x.to(device)
-y = data.y.squeeze().to(device)
+    def parameter_rrefs(self):
+        remote_params = []
+        remote_params.extend(_parameter_rrefs(self.local_layer))
+        remote_params.extend(_remote_method(
+            _parameter_rrefs, self.remote_layer_rref))
+        return remote_params
 
 
-def train(epoch):
+x = data.x
+y = data.y.squeeze()
+
+
+def train(model, optimizer, epoch):
     model.train()
 
     pbar = tqdm(total=int(data.train_mask.sum()))
@@ -106,7 +140,7 @@ def train(epoch):
     total_loss = total_correct = 0
     for batch_size, n_id, adjs in train_loader:
         # `adjs` holds a list of `(edge_index, e_id, size)` tuples.
-        adjs = [adj.to(device) for adj in adjs]
+        adjs = [adj for adj in adjs]
 
         optimizer.zero_grad()
         out = model(x[n_id], adjs)
@@ -127,12 +161,12 @@ def train(epoch):
 
 
 @torch.no_grad()
-def test():
+def test(model):
     model.eval()
 
     out = model.inference(x)
 
-    y_true = y.cpu().unsqueeze(-1)
+    y_true = y.unsqueeze(-1)
     y_pred = out.argmax(dim=-1, keepdim=True)
 
     results = []
@@ -142,9 +176,42 @@ def test():
     return results
 
 
-for epoch in range(1, 11):
-    loss, acc = train(epoch)
-    print(f'Epoch {epoch:02d}, Loss: {loss:.4f}, Approx. Train: {acc:.4f}')
-    train_acc, val_acc, test_acc = test()
-    print(f'Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
-          f'Test: {test_acc:.4f}')
+def _run_trainer():
+    print("_run_trainer()")
+    model = SAGE('ps', dataset.num_features, 256, dataset.num_classes)
+
+    optimizer = DistributedOptimizer(
+        torch.optim.Adam, model.parameter_rrefs(), lr=0.01)
+
+    for epoch in range(1, 11):
+        loss, acc = train(model, optimizer, epoch)
+        print(f'Epoch {epoch:02d}, Loss: {loss:.4f}, Approx. Train: {acc:.4f}')
+        train_acc, val_acc, test_acc = test(model)
+        print(f'Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
+              f'Test: {test_acc:.4f}')
+
+
+def run_worker(rank, world_size):
+    print("HELEELELELE: ", rank)
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '29501'
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    if rank == 1:
+        print("init ples")
+        rpc.init_rpc("trainer", rank=rank, world_size=world_size)
+        print("init doen")
+        _run_trainer()
+    else:
+        rpc.init_rpc("ps", rank=rank, world_size=world_size)
+        # parameter server do nothing
+        pass
+
+    # block until all rpcs finish
+    rpc.shutdown()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('rank', type=int, default=0)
+    args = parser.parse_args()
+    run_worker(args.rank, 2)

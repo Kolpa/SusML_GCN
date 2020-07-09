@@ -29,28 +29,15 @@ def _parameter_rrefs(module):
     return param_rrefs
 
 
-path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'Reddit')
-dataset = Reddit(path)
-data = dataset[0]
-
-train_loader = NeighborSampler(data.edge_index, node_idx=data.train_mask,
-                               sizes=[25, 10], batch_size=1024, shuffle=True,
-                               num_workers=12)
-
-subgraph_loader = NeighborSampler(data.edge_index, node_idx=None, sizes=[-1],
-                                  batch_size=1024, shuffle=False,
-                                  num_workers=12)
-
-
 class SAGE(torch.nn.Module):
-    def __init__(self, worker_name, in_channels, hidden_channels, out_channels):
+    def __init__(self, worker_name, in_channels, hidden_channels, out_channels,
+                 subgraph_loader):
         super(SAGE, self).__init__()
 
+        self.subgraph_loader = subgraph_loader
         self.local_layer = SAGEConv(in_channels, hidden_channels)
         self.remote_layer_rref = rpc.remote(
             worker_name, SAGEConv, args=(hidden_channels, out_channels))
-
-        print("SAGE init done")
 
     def forward(self, x, adjs):
         # `train_loader` computes the k-hop neighborhood of a batch of nodes,
@@ -80,7 +67,7 @@ class SAGE(torch.nn.Module):
         pbar.set_description('Evaluating')
 
         xs = []
-        for batch_size, n_id, adj in subgraph_loader:
+        for batch_size, n_id, adj in self.subgraph_loader:
             edge_index, _, size = adj
             x = x_all[n_id]
             x_target = x[:size[1]]
@@ -93,7 +80,7 @@ class SAGE(torch.nn.Module):
         x_all = torch.cat(xs, dim=0)
 
         xs = []
-        for batch_size, n_id, adj in subgraph_loader:
+        for batch_size, n_id, adj in self.subgraph_loader:
             edge_index, _, size = adj
             x = x_all[n_id]
             x_target = x[:size[1]]
@@ -122,16 +109,13 @@ class SAGE(torch.nn.Module):
         return remote_params
 
 
-x = data.x
-y = data.y.squeeze()
-
-
-def train(model, optimizer, epoch):
+def train(model, optimizer, epoch, data, train_loader):
     model.train()
 
     pbar = tqdm(total=int(data.train_mask.sum()))
     pbar.set_description(f'Epoch {epoch:02d}')
-
+    x = data.x
+    y = data.y.squeeze()
     total_loss = total_correct = 0
     for batch_size, n_id, adjs in train_loader:
         # `adjs` holds a list of `(edge_index, e_id, size)` tuples.
@@ -157,9 +141,10 @@ def train(model, optimizer, epoch):
 
 
 @torch.no_grad()
-def test(model):
+def test(model, data):
     model.eval()
-
+    x = data.x
+    y = data.y.squeeze()
     out = model.inference(x)
 
     y_true = y.unsqueeze(-1)
@@ -173,28 +158,49 @@ def test(model):
 
 
 def _run_trainer():
-    print("_run_trainer()")
-    model = SAGE('ps', dataset.num_features, 256, dataset.num_classes)
+    path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'Reddit')
+    print("Load Dataset")
+    dataset = Reddit(path)
+    data = dataset[0]
+    print("Load Train Sampler")
+    train_loader = NeighborSampler(data.edge_index, node_idx=data.train_mask,
+                                   sizes=[25, 10],
+                                   batch_size=1024, shuffle=True,
+                                   num_workers=12)
+    print("Load subgraph sampler")
+    subgraph_loader = NeighborSampler(data.edge_index, node_idx=None,
+                                      sizes=[-1],
+                                      batch_size=1024, shuffle=False,
+                                      num_workers=12)
+
+    print("Creating SAGE model")
+    model = SAGE('ps', dataset.num_features, 256, dataset.num_classes,
+                 subgraph_loader)
 
     optimizer = DistributedOptimizer(
         torch.optim.Adam, model.parameter_rrefs(), lr=0.01)
 
+    print("Start training")
     for epoch in range(1, 11):
-        loss, acc = train(model, optimizer, epoch)
+        loss, acc = train(model, optimizer, epoch, data, train_loader)
         print(f'Epoch {epoch:02d}, Loss: {loss:.4f}, Approx. Train: {acc:.4f}')
-        train_acc, val_acc, test_acc = test(model)
+        train_acc, val_acc, test_acc = test(model, data)
         print(f'Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
               f'Test: {test_acc:.4f}')
 
 
 def run_worker(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
 
     if rank == 0:
+        print("Starting Trainer")
+        print("Waiting...")
         rpc.init_rpc("trainer", rank=rank, world_size=world_size)
         _run_trainer()
     else:
+        print("Starting Worker")
+        print("Waiting...")
         rpc.init_rpc("ps", rank=rank, world_size=world_size)
         # parameter server do nothing
         pass

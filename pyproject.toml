@@ -12,14 +12,18 @@ default = true
 [tool.poetry.dependencies]
 python = "^3.7"
 torch = "1.5.0"
-torch-scatter = "2.0.4"
-torch-sparse = "0.6.2"
-torch-cluster = "1.5.4"
+torch-scatter = "2.0.5"
+torch-sparse = "0.6.6"
+torch-cluster = "1.5.5"
 torch-spline-conv = "1.2.0"
-torch-geometric = "1.4.3"
+torch-geometric = "1.6.0"
+horovod = "0.19.2"
+joblib = "^0.16.0"
+llvmlite = "^0.33.0"
 
 [tool.poetry.dev-dependencies]
 flake8 = "^3.8.3"
+autopep8 = "^1.5.3"
 
 [build-system]
 requires = ["poetry>=0.12"]

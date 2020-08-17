@@ -19,9 +19,16 @@ ray.init()
 class SAGEConvActor(object):
     def __init__(self, in_channels, out_channels):
         self.conv = SAGEConv(in_channels, out_channels)
+        self.local_optim = Adam(self.conv.parameters(), lr=0.01)
 
     def forward(self, x: Union[Tensor, OptPairTensor], edge_index: Adj):
         return self.conv(x, edge_index)
+
+    def zero_grad(self):
+        self.local_optim.zero_grad()
+
+    def step(self):
+        self.local_optim.step()
 
 
 class SAGE(Module):
@@ -45,8 +52,20 @@ class SAGE(Module):
 
         return x.log_softmax(dim=-1)
 
+    def zero_grad(self):
+        zero_ref = self.first_layer.zero_grad.remote()
+        ray.get(zero_ref)
+        zero_ref = self.second_layer.zero_grad.remote()
+        ray.get(zero_ref)
 
-def train(model, optimizer, epoch, data, train_loader):
+    def step(self):
+        step_ref = self.first_layer.step.remote()
+        ray.get(step_ref)
+        step_ref = self.second_layer.step.remote()
+        ray.get(step_ref)
+
+
+def train(model, epoch, data, train_loader):
     model.train()
 
     x = data.x
@@ -58,11 +77,11 @@ def train(model, optimizer, epoch, data, train_loader):
     pbar.set_description(f'Epoch {epoch:02d}')
 
     for batch_size, n_id, adjs in train_loader:
-        # optimizer.zero_grad()
+        model.zero_grad()
         out = model(x[n_id], adjs)
         loss = F.nll_loss(out, y[n_id[:batch_size]])
         loss.backward()
-        # optimizer.step()
+        model.step()
 
         total_loss += float(loss)
         total_correct += int(out.argmax(dim=-1).eq(y[n_id[:batch_size]]).sum())
@@ -86,17 +105,16 @@ def _run_trainer():
     train_loader = NeighborSampler(data.edge_index, node_idx=data.train_mask,
                                    sizes=[25, 10],
                                    batch_size=1024, shuffle=True,
-                                   num_workers=12)
+                                   num_workers=0)
 
     print("Creating SAGE model")
     model = SAGE(dataset.num_features, 128, dataset.num_classes)
 
-    #optimizer = Adam(model.parameters(), lr=0.01)
-
     print("Start training")
     for epoch in range(1, 11):
-        loss, acc = train(model, None, epoch, data, train_loader)
+        loss, acc = train(model, epoch, data, train_loader)
         print(f'Epoch {epoch:02d}, Loss: {loss:.4f}, Approx. Train: {acc:.4f}')
 
 
-_run_trainer()
+if __name__ == '__main__':
+    _run_trainer()

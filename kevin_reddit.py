@@ -117,7 +117,7 @@ def _run_trainer():
 
 
 def run_worker(rank, world_size):
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_ADDR'] = 'luna'
     os.environ['MASTER_PORT'] = '29500'
 
     if rank == 0:

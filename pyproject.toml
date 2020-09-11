@@ -1,8 +1,8 @@
 [tool.poetry]
 name = "susml"
 version = "0.1.0"
-description = "Help me JEsus"
-authors = ["Your Name <you@example.com>"]
+description = "Dependencies for GCN distributed solutions"
+authors = ["Kolya Opahle", "Milan Proell"]
 
 [[tool.poetry.source]]
 name = "private"

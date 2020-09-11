@@ -15,7 +15,7 @@ This has only been tested on linux
 
 ## Summary
 
-We tried multiple versions of a pytorch geometric GCN impementation using the example [reddit dataset](https://github.com/rusty1s/pytorch_geometric/blob/master/examples/reddit.py). Following is a short description of those versions.
+We tried multiple versions of a pytorch geometric GCN impementation using the example [reddit dataset](https://github.com/rusty1s/pytorch_geometric/blob/master/examples/reddit.py). In following we will describe those versions in a short manner.
 
 ### reddit.py
 
